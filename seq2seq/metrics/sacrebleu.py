@@ -854,6 +854,7 @@ def corpus_bleu(sys_stream, ref_streams, smooth='exp', smooth_floor=0.0, force=F
         sys_stream = [sys_stream]
     if isinstance(ref_streams, str):
         ref_streams = [[ref_streams]]
+    print("sys_stream={}, ref_streams={}".format(sys_stream, ref_streams))
 
     sys_len = 0
     ref_len = 0
@@ -881,8 +882,7 @@ def corpus_bleu(sys_stream, ref_streams, smooth='exp', smooth_floor=0.0, force=F
                 logging.warning('If you insist your data is tokenized, you can suppress this message with \'--force\'.')
 
         output, *refs = [TOKENIZERS[tokenize](x.rstrip()) for x in lines]
-        print(output)
-        print(refs)
+        print("outupt={}, refs={}".format(output, refs))
 
         ref_ngrams, closest_diff, closest_len = ref_stats(output, refs)
 
@@ -890,12 +890,87 @@ def corpus_bleu(sys_stream, ref_streams, smooth='exp', smooth_floor=0.0, force=F
         ref_len += closest_len
         print(sys_len, ref_len)
         sys_ngrams = extract_ngrams(output)
+        print("sys_ngrams={}".format(sys_ngrams))
         for ngram in sys_ngrams.keys():
             n = len(ngram.split())
 
             correct[n - 1] += min(sys_ngrams[ngram], ref_ngrams.get(ngram, 0))
             total[n - 1] += sys_ngrams[ngram]
-            print("ngram={}, n={}, correct={}, total={}".format(ngram, n, correct, total))
+    print("correct={}, total={}".format(correct, total))
+    return compute_bleu(correct, total, sys_len, ref_len, smooth, smooth_floor, use_effective_order)
+
+
+def get_corpus_bleu(candidate_file,
+                    reference_files,
+                    smooth='exp',
+                    smooth_floor=0.0,
+                    force=False,
+                    lowercase=False,
+                    tokenize=DEFAULT_TOKENIZER,
+                    use_effective_order=False) -> BLEU:
+    """Produces BLEU scores along with its sufficient statistics from a source against one or more references.
+
+    :param candidate_file: path of candidate sentences
+    :param reference_files: A list of path of reference file, (one or more)
+    :param smooth: The smoothing method to use
+    :param smooth_floor: For 'floor' smoothing, the floor to use
+    :param force: Ignore data that looks already tokenized
+    :param lowercase: Lowercase the data
+    :param tokenize: The tokenizer to use
+    :return: a BLEU object containing everything you'd want
+    """
+
+    # Add some robustness to the input arguments
+
+    with open(candidate_file) as f:
+        candidate = f.readlines()
+
+    references = []
+    for ref_file in reference_files:
+        with open(ref_file) as f:
+            ref = f.readlines()
+            references.append(ref)
+
+    sys_len = 0
+    ref_len = 0
+
+    correct = [0 for n in range(NGRAM_ORDER)]
+    total = [0 for n in range(NGRAM_ORDER)]
+
+    # look for already-tokenized sentences
+    tokenized_count = 0
+
+    fhs = [candidate] + references
+    for lines in zip_longest(*fhs):
+        if None in lines:
+            raise EOFError("Source and reference streams have different lengths!")
+        print("lines={}".format(lines))
+        if lowercase:
+            lines = [x.lower() for x in lines]
+
+        if (not force or tokenize != 'none') and lines[0].rstrip().endswith(' .'):
+            tokenized_count += 1
+
+            if tokenized_count == 100:
+                logging.warning('That\'s > 100 lines that end in a tokenized period (\'.\')')
+                logging.warning('It looks like you forgot to detokenize your test data, which may hurt your score.')
+                logging.warning('If you insist your data is tokenized, you can suppress this message with \'--force\'.')
+
+        output, *refs = [TOKENIZERS[tokenize](x.rstrip()) for x in lines]
+        print("outupt={}, refs={}".format(output, refs))
+
+        ref_ngrams, closest_diff, closest_len = ref_stats(output, refs)
+
+        sys_len += len(output.split())
+        ref_len += closest_len
+        print(sys_len, ref_len)
+        sys_ngrams = extract_ngrams(output)
+        print("sys_ngrams={}".format(sys_ngrams))
+        for ngram in sys_ngrams.keys():
+            n = len(ngram.split())
+
+            correct[n - 1] += min(sys_ngrams[ngram], ref_ngrams.get(ngram, 0))
+            total[n - 1] += sys_ngrams[ngram]
     print("correct={}, total={}".format(correct, total))
     return compute_bleu(correct, total, sys_len, ref_len, smooth, smooth_floor, use_effective_order)
 
@@ -1020,5 +1095,11 @@ def main():
                                                                                                                                bleu.precisions[0], bleu.precisions[1], bleu.precisions[2], bleu.precisions[3], bleu.bp, bleu.sys_len / bleu.ref_len, bleu.sys_len, bleu.ref_len))
 
 
+def test():
+    bleu = get_corpus_bleu("/tmp/can1", ["/tmp/ref1", "/tmp/ref2"])
+    print(bleu)
+
+
 if __name__ == '__main__':
-    main()
+    # main()
+    test()
