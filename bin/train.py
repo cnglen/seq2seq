@@ -106,10 +106,10 @@ tf.flags.DEFINE_integer("keep_checkpoint_every_n_hours", 4,
                         """In addition to keeping the most recent checkpoint
                         files, keep one checkpoint file for every N hours of
                         training.""")
-tf.flags.DEFINE_float("gpu_memory_fraction", 1.0,
+tf.flags.DEFINE_float("gpu_memory_fraction", 0.5,
                       """Fraction of GPU memory used by the process on
                       each GPU uniformly on the same machine.""")
-tf.flags.DEFINE_boolean("gpu_allow_growth", False,
+tf.flags.DEFINE_boolean("gpu_allow_growth", True,
                         """Allow GPU memory allocation to grow
                         dynamically.""")
 tf.flags.DEFINE_boolean("log_device_placement", False,
@@ -118,160 +118,161 @@ tf.flags.DEFINE_boolean("log_device_placement", False,
 
 FLAGS = tf.flags.FLAGS
 
+
 def create_experiment(output_dir):
-  """
-  Creates a new Experiment instance.
+    """
+    Creates a new Experiment instance.
 
-  Args:
-    output_dir: Output directory for model checkpoints and summaries.
-  """
+    Args:
+      output_dir: Output directory for model checkpoints and summaries.
+    """
 
-  config = run_config.RunConfig(
-      tf_random_seed=FLAGS.tf_random_seed,
-      save_checkpoints_secs=FLAGS.save_checkpoints_secs,
-      save_checkpoints_steps=FLAGS.save_checkpoints_steps,
-      keep_checkpoint_max=FLAGS.keep_checkpoint_max,
-      keep_checkpoint_every_n_hours=FLAGS.keep_checkpoint_every_n_hours,
-      gpu_memory_fraction=FLAGS.gpu_memory_fraction)
-  config.tf_config.gpu_options.allow_growth = FLAGS.gpu_allow_growth
-  config.tf_config.log_device_placement = FLAGS.log_device_placement
+    config = run_config.RunConfig(
+        tf_random_seed=FLAGS.tf_random_seed,
+        save_checkpoints_secs=FLAGS.save_checkpoints_secs,
+        save_checkpoints_steps=FLAGS.save_checkpoints_steps,
+        keep_checkpoint_max=FLAGS.keep_checkpoint_max,
+        keep_checkpoint_every_n_hours=FLAGS.keep_checkpoint_every_n_hours,
+        gpu_memory_fraction=FLAGS.gpu_memory_fraction)
+    config.tf_config.gpu_options.allow_growth = FLAGS.gpu_allow_growth
+    config.tf_config.log_device_placement = FLAGS.log_device_placement
 
-  train_options = training_utils.TrainOptions(
-      model_class=FLAGS.model,
-      model_params=FLAGS.model_params)
-  # On the main worker, save training options
-  if config.is_chief:
-    gfile.MakeDirs(output_dir)
-    train_options.dump(output_dir)
+    print("config={}".format(config))
+    train_options = training_utils.TrainOptions(
+        model_class=FLAGS.model,
+        model_params=FLAGS.model_params)
+    # On the main worker, save training options
+    if config.is_chief:
+        gfile.MakeDirs(output_dir)
+        train_options.dump(output_dir)
 
-  bucket_boundaries = None
-  if FLAGS.buckets:
-    bucket_boundaries = list(map(int, FLAGS.buckets.split(",")))
+    bucket_boundaries = None
+    if FLAGS.buckets:
+        bucket_boundaries = list(map(int, FLAGS.buckets.split(",")))
 
-  # Training data input pipeline
-  train_input_pipeline = input_pipeline.make_input_pipeline_from_def(
-      def_dict=FLAGS.input_pipeline_train,
-      mode=tf.contrib.learn.ModeKeys.TRAIN)
+    # Training data input pipeline
+    train_input_pipeline = input_pipeline.make_input_pipeline_from_def(
+        def_dict=FLAGS.input_pipeline_train,
+        mode=tf.contrib.learn.ModeKeys.TRAIN)
 
-  # Create training input function
-  train_input_fn = training_utils.create_input_fn(
-      pipeline=train_input_pipeline,
-      batch_size=FLAGS.batch_size,
-      bucket_boundaries=bucket_boundaries,
-      scope="train_input_fn")
+    # Create training input function
+    train_input_fn = training_utils.create_input_fn(
+        pipeline=train_input_pipeline,
+        batch_size=FLAGS.batch_size,
+        bucket_boundaries=bucket_boundaries,
+        scope="train_input_fn")
 
-  # Development data input pipeline
-  dev_input_pipeline = input_pipeline.make_input_pipeline_from_def(
-      def_dict=FLAGS.input_pipeline_dev,
-      mode=tf.contrib.learn.ModeKeys.EVAL,
-      shuffle=False, num_epochs=1)
+    # Development data input pipeline
+    dev_input_pipeline = input_pipeline.make_input_pipeline_from_def(
+        def_dict=FLAGS.input_pipeline_dev,
+        mode=tf.contrib.learn.ModeKeys.EVAL,
+        shuffle=False, num_epochs=1)
 
-  # Create eval input function
-  eval_input_fn = training_utils.create_input_fn(
-      pipeline=dev_input_pipeline,
-      batch_size=FLAGS.batch_size,
-      allow_smaller_final_batch=True,
-      scope="dev_input_fn")
+    # Create eval input function
+    eval_input_fn = training_utils.create_input_fn(
+        pipeline=dev_input_pipeline,
+        batch_size=FLAGS.batch_size,
+        allow_smaller_final_batch=True,
+        scope="dev_input_fn")
 
+    def model_fn(features, labels, params, mode):
+        """Builds the model graph"""
+        model = _create_from_dict({
+            "class": train_options.model_class,
+            "params": train_options.model_params
+        }, models, mode=mode)
+        return model(features, labels, params)
 
-  def model_fn(features, labels, params, mode):
-    """Builds the model graph"""
-    model = _create_from_dict({
-        "class": train_options.model_class,
-        "params": train_options.model_params
-    }, models, mode=mode)
-    return model(features, labels, params)
+    estimator = tf.contrib.learn.Estimator(
+        model_fn=model_fn,
+        model_dir=output_dir,
+        config=config,
+        params=FLAGS.model_params)
 
-  estimator = tf.contrib.learn.Estimator(
-      model_fn=model_fn,
-      model_dir=output_dir,
-      config=config,
-      params=FLAGS.model_params)
+    # Create hooks
+    train_hooks = []
+    for dict_ in FLAGS.hooks:
+        hook = _create_from_dict(
+            dict_, hooks,
+            model_dir=estimator.model_dir,
+            run_config=config)
+        train_hooks.append(hook)
 
-  # Create hooks
-  train_hooks = []
-  for dict_ in FLAGS.hooks:
-    hook = _create_from_dict(
-        dict_, hooks,
-        model_dir=estimator.model_dir,
-        run_config=config)
-    train_hooks.append(hook)
+    # Create metrics
+    eval_metrics = {}
+    for dict_ in FLAGS.metrics:
+        metric = _create_from_dict(dict_, metric_specs)
+        eval_metrics[metric.name] = metric
 
-  # Create metrics
-  eval_metrics = {}
-  for dict_ in FLAGS.metrics:
-    metric = _create_from_dict(dict_, metric_specs)
-    eval_metrics[metric.name] = metric
+    experiment = PatchedExperiment(
+        estimator=estimator,
+        train_input_fn=train_input_fn,
+        eval_input_fn=eval_input_fn,
+        min_eval_frequency=FLAGS.eval_every_n_steps,
+        train_steps=FLAGS.train_steps,
+        eval_steps=None,
+        eval_metrics=eval_metrics,
+        train_monitors=train_hooks)
 
-  experiment = PatchedExperiment(
-      estimator=estimator,
-      train_input_fn=train_input_fn,
-      eval_input_fn=eval_input_fn,
-      min_eval_frequency=FLAGS.eval_every_n_steps,
-      train_steps=FLAGS.train_steps,
-      eval_steps=None,
-      eval_metrics=eval_metrics,
-      train_monitors=train_hooks)
-
-  return experiment
+    return experiment
 
 
 def main(_argv):
-  """The entrypoint for the script"""
+    """The entrypoint for the script"""
 
-  # Parse YAML FLAGS
-  FLAGS.hooks = _maybe_load_yaml(FLAGS.hooks)
-  FLAGS.metrics = _maybe_load_yaml(FLAGS.metrics)
-  FLAGS.model_params = _maybe_load_yaml(FLAGS.model_params)
-  FLAGS.input_pipeline_train = _maybe_load_yaml(FLAGS.input_pipeline_train)
-  FLAGS.input_pipeline_dev = _maybe_load_yaml(FLAGS.input_pipeline_dev)
+    # Parse YAML FLAGS
+    FLAGS.hooks = _maybe_load_yaml(FLAGS.hooks)
+    FLAGS.metrics = _maybe_load_yaml(FLAGS.metrics)
+    FLAGS.model_params = _maybe_load_yaml(FLAGS.model_params)
+    FLAGS.input_pipeline_train = _maybe_load_yaml(FLAGS.input_pipeline_train)
+    FLAGS.input_pipeline_dev = _maybe_load_yaml(FLAGS.input_pipeline_dev)
 
-  # Load flags from config file
-  final_config = {}
-  if FLAGS.config_paths:
-    for config_path in FLAGS.config_paths.split(","):
-      config_path = config_path.strip()
-      if not config_path:
-        continue
-      config_path = os.path.abspath(config_path)
-      tf.logging.info("Loading config from %s", config_path)
-      with gfile.GFile(config_path.strip()) as config_file:
-        config_flags = yaml.load(config_file)
-        final_config = _deep_merge_dict(final_config, config_flags)
+    # Load flags from config file
+    final_config = {}
+    if FLAGS.config_paths:
+        for config_path in FLAGS.config_paths.split(","):
+            config_path = config_path.strip()
+            if not config_path:
+                continue
+            config_path = os.path.abspath(config_path)
+            tf.logging.info("Loading config from %s", config_path)
+            with gfile.GFile(config_path.strip()) as config_file:
+                config_flags = yaml.load(config_file)
+                final_config = _deep_merge_dict(final_config, config_flags)
 
-  tf.logging.info("Final Config:\n%s", yaml.dump(final_config))
+    tf.logging.info("Final Config:\n%s", yaml.dump(final_config))
 
-  # Merge flags with config values
-  for flag_key, flag_value in final_config.items():
-    if hasattr(FLAGS, flag_key) and isinstance(getattr(FLAGS, flag_key), dict):
-      merged_value = _deep_merge_dict(flag_value, getattr(FLAGS, flag_key))
-      setattr(FLAGS, flag_key, merged_value)
-    elif hasattr(FLAGS, flag_key):
-      setattr(FLAGS, flag_key, flag_value)
-    else:
-      tf.logging.warning("Ignoring config flag: %s", flag_key)
+    # Merge flags with config values
+    for flag_key, flag_value in final_config.items():
+        if hasattr(FLAGS, flag_key) and isinstance(getattr(FLAGS, flag_key), dict):
+            merged_value = _deep_merge_dict(flag_value, getattr(FLAGS, flag_key))
+            setattr(FLAGS, flag_key, merged_value)
+        elif hasattr(FLAGS, flag_key):
+            setattr(FLAGS, flag_key, flag_value)
+        else:
+            tf.logging.warning("Ignoring config flag: %s", flag_key)
 
-  if FLAGS.save_checkpoints_secs is None \
-    and FLAGS.save_checkpoints_steps is None:
-    FLAGS.save_checkpoints_secs = 600
-    tf.logging.info("Setting save_checkpoints_secs to %d",
-                    FLAGS.save_checkpoints_secs)
+    if FLAGS.save_checkpoints_secs is None \
+            and FLAGS.save_checkpoints_steps is None:
+        FLAGS.save_checkpoints_secs = 600
+        tf.logging.info("Setting save_checkpoints_secs to %d",
+                        FLAGS.save_checkpoints_secs)
 
-  if not FLAGS.output_dir:
-    FLAGS.output_dir = tempfile.mkdtemp()
+    if not FLAGS.output_dir:
+        FLAGS.output_dir = tempfile.mkdtemp()
 
-  if not FLAGS.input_pipeline_train:
-    raise ValueError("You must specify input_pipeline_train")
+    if not FLAGS.input_pipeline_train:
+        raise ValueError("You must specify input_pipeline_train")
 
-  if not FLAGS.input_pipeline_dev:
-    raise ValueError("You must specify input_pipeline_dev")
+    if not FLAGS.input_pipeline_dev:
+        raise ValueError("You must specify input_pipeline_dev")
 
-  learn_runner.run(
-      experiment_fn=create_experiment,
-      output_dir=FLAGS.output_dir,
-      schedule=FLAGS.schedule)
+    learn_runner.run(
+        experiment_fn=create_experiment,
+        output_dir=FLAGS.output_dir,
+        schedule=FLAGS.schedule)
 
 
 if __name__ == "__main__":
-  tf.logging.set_verbosity(tf.logging.INFO)
-  tf.app.run()
+    tf.logging.set_verbosity(tf.logging.INFO)
+    tf.app.run()
