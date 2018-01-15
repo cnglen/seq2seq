@@ -1,0 +1,62 @@
+#+TITLE: seq2seq代码解读
+
+
+* summary
+
+cloc .
+     136 text files.
+     134 unique files.
+      18 files ignored.
+
+github.com/AlDanial/cloc v 1.70  T=0.22 s (552.5 files/s, 64365.0 lines/s)
+-------------------------------------------------------------------------------
+Language                     files          blank        comment           code
+-------------------------------------------------------------------------------
+Python                          81           2056           3387           6619
+Markdown                        19            289              0            689
+YAML                            11              5              0            289
+Bourne Shell                     5             56             76            243
+Perl                             1             15             19            140
+JavaScript                       1             28             25             89
+INI                              1              4              0             28
+CSS                              2              5             15             19
+-------------------------------------------------------------------------------
+SUM:                           121           2458           3522           8116
+-------------------------------------------------------------------------------
+
+
+* 整体架构
+
+  PYTHONPATH=${HOME}/Workspace/repos/seq2seq ./bin/infer.py -h: 预测
+
+  PYTHONPATH=${HOME}/Workspace/repos/seq2seq ./bin/train.py -h: 训练
+
+  - train.py
+    - learn_runner(experiment_fn=create_experiment)
+    - PatchedExperiment
+      - tf.contrib.learn.Estimator
+        - model_fn:
+          - model_class: yml.model: AttentionSeq2Seq
+          - model_params:
+            - encoder
+              - class
+              - params
+            - decoder
+              - class
+              - params
+            - attention
+              - class
+              - params
+
+      - train_input_fn
+      - eval_input_fn
+      - train_hooks
+      - eval_metrics
+
+    - AttentionSeq2Seq <- BasicSeq2seq <- Seq2seqModel <- ModelBase <- Configurable
+      - encode(): @templatemethod
+      - decode(): @templatemethod
+
+
+  - template method
+    - resuing variable
